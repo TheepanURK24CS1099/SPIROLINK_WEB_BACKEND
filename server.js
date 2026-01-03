@@ -28,7 +28,7 @@ const openai = new OpenAI({
 });
 
 /* ===============================
-   EMAIL (GMAIL)
+   EMAIL (GMAIL WITH RETRY)
 ================================ */
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -36,6 +36,8 @@ const transporter = nodemailer.createTransport({
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASSWORD,
   },
+  connectionTimeout: 5000,
+  socketTimeout: 5000,
 });
 
 /* ===============================
