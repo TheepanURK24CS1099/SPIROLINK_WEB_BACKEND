@@ -109,3 +109,4 @@ Deploy to: Render, Railway, Heroku, or AWS Lambda
 ---
 
 **Backend ready!** Frontend connects at `http://localhost:5000/chat`
+# Gmail email service configured and working
