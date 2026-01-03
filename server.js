@@ -30,7 +30,7 @@ const openai = new OpenAI({
 });
 
 /* ===============================
-   EMAIL CONFIGURATION
+   EMAIL CONFIGURATION - Gmail Priority
 ================================ */
 let emailService = 'none';
 let transporter;
@@ -38,15 +38,57 @@ let resend;
 
 async function initializeEmailTransport() {
   try {
-    // Priority 1: SendGrid (best for Render free tier - HTTP API, not SMTP)
+    // Priority 1: Gmail (with optimal settings for Render)
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
+      console.log('✅ Email service: Gmail SMTP');
+      transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false, // Use TLS, not SSL
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASSWORD,
+        },
+        // Optimal settings for reliable connection
+        connectionTimeout: 30000, // 30 seconds
+        socketTimeout: 30000, // 30 seconds
+        pool: {
+          maxConnections: 5,
+          maxMessages: 100,
+          rateDelta: 2000,
+          rateLimit: 10,
+        },
+        // Disable TLS validation issues
+        tls: {
+          rejectUnauthorized: false,
+        },
+        // Connection options
+        maxConnections: 5,
+        maxMessages: 100,
+      });
+      
+      // Test the connection
+      try {
+        await transporter.verify();
+        emailService = 'gmail';
+        console.log('✅ Gmail SMTP connection verified successfully');
+        return;
+      } catch (verifyErr) {
+        console.error('❌ Gmail verification failed:', verifyErr.message);
+        emailService = 'gmail_error';
+        throw verifyErr;
+      }
+    }
+
+    // Priority 2: SendGrid (HTTP API - fallback)
     if (process.env.SENDGRID_API_KEY) {
       sgMail.setApiKey(process.env.SENDGRID_API_KEY);
       emailService = 'sendgrid';
-      console.log('✅ Email service: SendGrid (HTTP API - works with Render free tier)');
+      console.log('✅ Email service: SendGrid (HTTP API fallback)');
       return;
     }
 
-    // Priority 2: Resend API
+    // Priority 3: Resend API
     if (process.env.RESEND_API_KEY) {
       resend = new Resend(process.env.RESEND_API_KEY);
       emailService = 'resend';
@@ -54,42 +96,10 @@ async function initializeEmailTransport() {
       return;
     }
 
-    // Priority 3: Gmail (unlikely to work on Render free tier)
-    if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
-      console.log('⚠️  Email service: Gmail (may timeout on free Render tier)');
-      transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASSWORD,
-        },
-        connectionTimeout: 5000,
-        socketTimeout: 5000,
-      });
-      emailService = 'gmail';
-      return;
-    }
+    // Fallback: Disabled
+    console.log('⚠️  Email service: No credentials configured');
+    emailService = 'disabled';
 
-    // Priority 4: Ethereal (works locally, may timeout on Render)
-    console.log('⚠️  Email service: Ethereal (may timeout on Render free tier)');
-    try {
-      const testAccount = await nodemailer.createTestAccount();
-      transporter = nodemailer.createTransport({
-        host: 'smtp.ethereal.email',
-        port: 587,
-        secure: false,
-        auth: {
-          user: testAccount.user,
-          pass: testAccount.pass,
-        },
-        connectionTimeout: 10000,
-        socketTimeout: 10000,
-      });
-      emailService = 'ethereal';
-    } catch (err) {
-      console.log('⚠️  Ethereal account creation failed, email disabled');
-      emailService = 'disabled';
-    }
   } catch (err) {
     console.error('❌ Email transport initialization failed:', err.message);
     emailService = 'disabled';
@@ -196,9 +206,44 @@ app.post("/contact", async (req, res) => {
       <p>Regards,<br>SPIROLINK Team</p>
     `;
 
-    // Send email based on configured service
+    // Try Gmail first
+    if ((emailService === 'gmail' || emailService === 'gmail_error') && transporter) {
+      try {
+        console.log('📧 Sending via Gmail to contact@spirolink.com...');
+        
+        const info1 = await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: 'contact@spirolink.com',
+          subject: `New Contact Form - ${serviceType || "General"}`,
+          html: emailBody,
+          replyTo: email,
+        });
+
+        console.log('✅ Company email sent, Message ID:', info1.messageId);
+
+        const info2 = await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: email,
+          subject: 'We received your message - SPIROLINK',
+          html: confirmationBody,
+        });
+
+        console.log('✅ Confirmation email sent, Message ID:', info2.messageId);
+
+        return res.json({
+          success: true,
+          message: 'Email sent successfully via Gmail',
+          service: 'gmail',
+        });
+      } catch (gmailErr) {
+        console.error('❌ Gmail error:', gmailErr.message);
+        // Don't fall back automatically, report the error
+        throw gmailErr;
+      }
+    }
+
+    // Fallback to SendGrid if configured
     if (emailService === 'sendgrid') {
-      // Using SendGrid HTTP API (works with Render free tier!)
       try {
         const msg1 = {
           to: 'contact@spirolink.com',
@@ -217,13 +262,20 @@ app.post("/contact", async (req, res) => {
         await sgMail.send(msg1);
         await sgMail.send(msg2);
         
-        console.log('✅ Email sent via SendGrid');
+        console.log('✅ Email sent via SendGrid (Gmail fallback)');
+        return res.json({
+          success: true,
+          message: 'Email sent successfully via SendGrid',
+          service: 'sendgrid',
+        });
       } catch (sgErr) {
         console.error('❌ SendGrid error:', sgErr.message);
-        throw new Error(`SendGrid failed: ${sgErr.message}`);
+        throw sgErr;
       }
-    } else if (emailService === 'resend' && resend) {
-      // Using Resend API
+    }
+
+    // Fallback to Resend
+    if (emailService === 'resend' && resend) {
       try {
         await resend.emails.send({
           from: 'noreply@spirolink.com',
@@ -240,81 +292,28 @@ app.post("/contact", async (req, res) => {
         });
         
         console.log('✅ Email sent via Resend');
+        return res.json({
+          success: true,
+          message: 'Email sent successfully via Resend',
+          service: 'resend',
+        });
       } catch (resendErr) {
         console.error('❌ Resend error:', resendErr.message);
-        throw new Error(`Resend API failed: ${resendErr.message}`);
+        throw resendErr;
       }
-    } else if (emailService === 'gmail' && transporter) {
-      // Using Gmail via Nodemailer
-      try {
-        await transporter.sendMail({
-          from: process.env.EMAIL_USER,
-          to: 'contact@spirolink.com',
-          subject: `New Contact Form - ${serviceType || "General"}`,
-          html: emailBody,
-        });
-
-        await transporter.sendMail({
-          from: process.env.EMAIL_USER,
-          to: email,
-          subject: 'We received your message - SPIROLINK',
-          html: confirmationBody,
-        });
-        
-        console.log('✅ Email sent via Gmail');
-      } catch (gmailErr) {
-        console.error('❌ Gmail error:', gmailErr.message);
-        throw new Error(`Gmail SMTP failed: ${gmailErr.message}`);
-      }
-    } else if (emailService === 'ethereal' && transporter) {
-      // Using Ethereal test account
-      try {
-        const info1 = await transporter.sendMail({
-          from: 'noreply@spirolink.test',
-          to: 'contact@spirolink.com',
-          subject: `New Contact Form - ${serviceType || "General"}`,
-          html: emailBody,
-        });
-
-        const info2 = await transporter.sendMail({
-          from: 'noreply@spirolink.test',
-          to: email,
-          subject: 'We received your message - SPIROLINK',
-          html: confirmationBody,
-        });
-
-        console.log('✅ Email sent via Ethereal');
-        console.log('📧 Preview URL 1:', nodemailer.getTestMessageUrl(info1));
-        console.log('📧 Preview URL 2:', nodemailer.getTestMessageUrl(info2));
-      } catch (etherealErr) {
-        console.error('❌ Ethereal error:', etherealErr.message);
-        throw new Error(`Ethereal SMTP failed: ${etherealErr.message}`);
-      }
-    } else if (emailService === 'disabled') {
-      // Fallback: just log the email (development mode)
-      console.log('📧 EMAIL SERVICE DISABLED - Logging email instead:');
-      console.log('To:', 'contact@spirolink.com');
-      console.log('Subject:', `New Contact Form - ${serviceType || "General"}`);
-      console.log('Body:', emailBody);
-      console.log('---');
-      console.log('Confirmation to:', email);
-      console.log('---');
-      
-      return res.json({
-        success: true,
-        message: 'Message received (email service currently disabled)',
-        service: 'disabled',
-        warning: 'Configure SENDGRID_API_KEY, RESEND_API_KEY, or EMAIL_USER/PASSWORD',
-      });
-    } else {
-      throw new Error('Email service not properly initialized');
     }
 
-    res.json({
-      success: true,
-      message: 'Email sent successfully',
+    // If we get here, no email service is configured
+    console.log('📧 EMAIL SERVICE DISABLED - Logging email:');
+    console.log('To:', 'contact@spirolink.com');
+    console.log('Subject:', `New Contact Form - ${serviceType || "General"}`);
+    
+    return res.status(500).json({
+      success: false,
+      error: 'Email service not configured. Please set EMAIL_USER and EMAIL_PASSWORD environment variables.',
       service: emailService,
     });
+
   } catch (error) {
     console.error("❌ Contact form error:", error.message);
     res.status(500).json({
