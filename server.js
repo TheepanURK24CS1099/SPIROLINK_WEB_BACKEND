@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import OpenAI from "openai";
 import nodemailer from "nodemailer";
 import { Resend } from "resend";
+import sgMail from "@sendgrid/mail";
 
 dotenv.config();
 
@@ -31,13 +32,21 @@ const openai = new OpenAI({
 /* ===============================
    EMAIL CONFIGURATION
 ================================ */
-let emailService = 'ethereal'; // Default to Ethereal which works with Render free tier
+let emailService = 'none';
 let transporter;
 let resend;
 
 async function initializeEmailTransport() {
   try {
-    // Check if Resend API key is available (preferred for production)
+    // Priority 1: SendGrid (best for Render free tier - HTTP API, not SMTP)
+    if (process.env.SENDGRID_API_KEY) {
+      sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+      emailService = 'sendgrid';
+      console.log('✅ Email service: SendGrid (HTTP API - works with Render free tier)');
+      return;
+    }
+
+    // Priority 2: Resend API
     if (process.env.RESEND_API_KEY) {
       resend = new Resend(process.env.RESEND_API_KEY);
       emailService = 'resend';
@@ -45,7 +54,7 @@ async function initializeEmailTransport() {
       return;
     }
 
-    // Check if Gmail credentials are available
+    // Priority 3: Gmail (unlikely to work on Render free tier)
     if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
       console.log('⚠️  Email service: Gmail (may timeout on free Render tier)');
       transporter = nodemailer.createTransport({
@@ -61,10 +70,8 @@ async function initializeEmailTransport() {
       return;
     }
 
-    // Fallback to Ethereal test account (works reliably with Render free tier)
-    console.log('✅ Email service: Ethereal (free test service - works with Render)');
-    
-    // Try to create a fresh test account
+    // Priority 4: Ethereal (works locally, may timeout on Render)
+    console.log('⚠️  Email service: Ethereal (may timeout on Render free tier)');
     try {
       const testAccount = await nodemailer.createTestAccount();
       transporter = nodemailer.createTransport({
@@ -78,23 +85,11 @@ async function initializeEmailTransport() {
         connectionTimeout: 10000,
         socketTimeout: 10000,
       });
-    } catch (accountErr) {
-      // If account creation fails, use a generic Ethereal config
-      console.log('⚠️  Using generic Ethereal config (account creation failed)');
-      transporter = nodemailer.createTransport({
-        host: 'smtp.ethereal.email',
-        port: 587,
-        secure: false,
-        auth: {
-          user: 'demo@ethereal.email',
-          pass: 'demopass',
-        },
-        connectionTimeout: 10000,
-        socketTimeout: 10000,
-      });
+      emailService = 'ethereal';
+    } catch (err) {
+      console.log('⚠️  Ethereal account creation failed, email disabled');
+      emailService = 'disabled';
     }
-    
-    emailService = 'ethereal';
   } catch (err) {
     console.error('❌ Email transport initialization failed:', err.message);
     emailService = 'disabled';
@@ -202,7 +197,32 @@ app.post("/contact", async (req, res) => {
     `;
 
     // Send email based on configured service
-    if (emailService === 'resend' && resend) {
+    if (emailService === 'sendgrid') {
+      // Using SendGrid HTTP API (works with Render free tier!)
+      try {
+        const msg1 = {
+          to: 'contact@spirolink.com',
+          from: 'noreply@spirolink.com',
+          subject: `New Contact Form - ${serviceType || "General"}`,
+          html: emailBody,
+        };
+        
+        const msg2 = {
+          to: email,
+          from: 'noreply@spirolink.com',
+          subject: 'We received your message - SPIROLINK',
+          html: confirmationBody,
+        };
+        
+        await sgMail.send(msg1);
+        await sgMail.send(msg2);
+        
+        console.log('✅ Email sent via SendGrid');
+      } catch (sgErr) {
+        console.error('❌ SendGrid error:', sgErr.message);
+        throw new Error(`SendGrid failed: ${sgErr.message}`);
+      }
+    } else if (emailService === 'resend' && resend) {
       // Using Resend API
       try {
         await resend.emails.send({
@@ -280,12 +300,11 @@ app.post("/contact", async (req, res) => {
       console.log('Confirmation to:', email);
       console.log('---');
       
-      // In production, you should notify the user to configure email
       return res.json({
         success: true,
         message: 'Message received (email service currently disabled)',
         service: 'disabled',
-        warning: 'Configure RESEND_API_KEY, EMAIL_USER/PASSWORD, or Ethereal will be used',
+        warning: 'Configure SENDGRID_API_KEY, RESEND_API_KEY, or EMAIL_USER/PASSWORD',
       });
     } else {
       throw new Error('Email service not properly initialized');
