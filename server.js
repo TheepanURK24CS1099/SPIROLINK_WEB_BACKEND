@@ -149,9 +149,10 @@ app.post("/contact", async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Email error:", error.message);
+    console.error("Full error:", error);
     res.status(500).json({
       success: false,
-      error: "Failed to send email",
+      error: "Failed to send email: " + error.message,
     });
   }
 });
