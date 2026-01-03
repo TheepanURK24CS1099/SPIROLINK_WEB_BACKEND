@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
 dotenv.config();
 
@@ -28,17 +29,58 @@ const openai = new OpenAI({
 });
 
 /* ===============================
-   EMAIL (GMAIL WITH RETRY)
+   EMAIL CONFIGURATION
 ================================ */
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASSWORD,
-  },
-  connectionTimeout: 5000,
-  socketTimeout: 5000,
-});
+let emailService = 'ethereal'; // Default to Ethereal which works with Render free tier
+let transporter;
+let resend;
+
+async function initializeEmailTransport() {
+  try {
+    // Check if Resend API key is available (preferred for production)
+    if (process.env.RESEND_API_KEY) {
+      resend = new Resend(process.env.RESEND_API_KEY);
+      emailService = 'resend';
+      console.log('✅ Email service: Resend API');
+      return;
+    }
+
+    // Check if Gmail credentials are available
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
+      console.log('⚠️  Email service: Gmail (may timeout on free Render tier)');
+      transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASSWORD,
+        },
+        connectionTimeout: 5000,
+        socketTimeout: 5000,
+      });
+      emailService = 'gmail';
+      return;
+    }
+
+    // Fallback to Ethereal test account (works reliably with Render free tier)
+    console.log('✅ Email service: Ethereal (free test service - works with Render)');
+    const testAccount = await nodemailer.createTestAccount();
+    transporter = nodemailer.createTransport({
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
+      auth: {
+        user: testAccount.user,
+        pass: testAccount.pass,
+      },
+    });
+    emailService = 'ethereal';
+  } catch (err) {
+    console.error('❌ Email transport initialization failed:', err.message);
+    emailService = 'disabled';
+  }
+}
+
+initializeEmailTransport();
 
 /* ===============================
    HEALTH CHECK
@@ -47,7 +89,7 @@ app.get("/health", (req, res) => {
   res.json({
     status: "OK",
     backend: "SPIROLINK",
-    emailConfigured: !!process.env.EMAIL_USER,
+    emailService: emailService,
     openaiConfigured: !!process.env.OPENAI_API_KEY,
   });
 });
@@ -106,6 +148,7 @@ app.post("/contact", async (req, res) => {
   try {
     const { name, email, phone, serviceType, message } = req.body;
 
+    // Validation
     if (!name || !email || !message) {
       return res.status(400).json({
         success: false,
@@ -113,48 +156,79 @@ app.post("/contact", async (req, res) => {
       });
     }
 
-    // Email to company
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: 'contact@spirolink.com',
-      subject: `New Contact Form - ${serviceType || "General"}`,
-      html: `
-        <h2>New Contact Form Submission</h2>
-        <p><strong>Name:</strong> ${name}</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Phone:</strong> ${phone || "N/A"}</p>
-        <p><strong>Service:</strong> ${serviceType || "N/A"}</p>
-        <p><strong>Message:</strong></p>
-        <p>${message.replace(/\n/g, "<br>")}</p>
-        <hr>
-        <p><em>Reply to: ${email}</em></p>
-      `,
-    });
+    const emailBody = `
+      <h2>New Contact Form Submission</h2>
+      <p><strong>Name:</strong> ${name}</p>
+      <p><strong>Email:</strong> ${email}</p>
+      <p><strong>Phone:</strong> ${phone || "N/A"}</p>
+      <p><strong>Service:</strong> ${serviceType || "N/A"}</p>
+      <p><strong>Message:</strong></p>
+      <p>${message.replace(/\n/g, "<br>")}</p>
+      <hr>
+      <p><em>Reply to: ${email}</em></p>
+    `;
 
-    // Confirmation email to user
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: "We received your message - SPIROLINK",
-      html: `
-        <h3>Hello ${name},</h3>
-        <p>Thank you for contacting SPIROLINK.</p>
-        <p>We have received your message and will get back to you shortly.</p>
-        <br>
-        <p>Regards,<br>SPIROLINK Team</p>
-      `,
-    });
+    const confirmationBody = `
+      <h3>Hello ${name},</h3>
+      <p>Thank you for contacting SPIROLINK.</p>
+      <p>We have received your message and will get back to you shortly.</p>
+      <br>
+      <p>Regards,<br>SPIROLINK Team</p>
+    `;
+
+    // Send email based on configured service
+    if (emailService === 'resend') {
+      // Using Resend API
+      await resend.emails.send({
+        from: 'noreply@spirolink.com',
+        to: 'contact@spirolink.com',
+        subject: `New Contact Form - ${serviceType || "General"}`,
+        html: emailBody,
+      });
+
+      await resend.emails.send({
+        from: 'noreply@spirolink.com',
+        to: email,
+        subject: 'We received your message - SPIROLINK',
+        html: confirmationBody,
+      });
+    } else if (emailService === 'gmail' || emailService === 'ethereal') {
+      // Using Nodemailer (Gmail or Ethereal)
+      const fromEmail = emailService === 'gmail' ? process.env.EMAIL_USER : 'test@ethereal.email';
+
+      await transporter.sendMail({
+        from: fromEmail,
+        to: 'contact@spirolink.com',
+        subject: `New Contact Form - ${serviceType || "General"}`,
+        html: emailBody,
+      });
+
+      await transporter.sendMail({
+        from: fromEmail,
+        to: email,
+        subject: 'We received your message - SPIROLINK',
+        html: confirmationBody,
+      });
+
+      // If using Ethereal, provide preview URL
+      if (emailService === 'ethereal') {
+        console.log('📧 Ethereal test email preview:');
+        console.log('https://ethereal.email/messages');
+      }
+    } else {
+      throw new Error('Email service not configured. Please set RESEND_API_KEY or EMAIL_USER/EMAIL_PASSWORD.');
+    }
 
     res.json({
       success: true,
-      message: "Email sent successfully",
+      message: 'Email sent successfully',
+      service: emailService,
     });
   } catch (error) {
     console.error("❌ Email error:", error.message);
-    console.error("Full error:", error);
     res.status(500).json({
       success: false,
-      error: "Failed to send email: " + error.message,
+      error: `Failed to send email: ${error.message}`,
     });
   }
 });
