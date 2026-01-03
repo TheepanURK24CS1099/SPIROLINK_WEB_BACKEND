@@ -278,14 +278,14 @@ app.post("/contact", async (req, res) => {
     if (emailService === 'resend' && resend) {
       try {
         await resend.emails.send({
-          from: 'noreply@spirolink.com',
+          from: 'onboarding@resend.dev',
           to: 'contact@spirolink.com',
           subject: `New Contact Form - ${serviceType || "General"}`,
           html: emailBody,
         });
 
         await resend.emails.send({
-          from: 'noreply@spirolink.com',
+          from: 'onboarding@resend.dev',
           to: email,
           subject: 'We received your message - SPIROLINK',
           html: confirmationBody,
